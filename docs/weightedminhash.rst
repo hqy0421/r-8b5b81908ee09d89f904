@@ -51,6 +51,59 @@ Here is a usage example.
     wm2 = wmg.minhash(v2)
     print("Estimated Jaccard is", wm1.jaccard(wm2))
 
+Generating signatures in batches
+--------------------------------
+
+For a sparse term-frequency matrix with many rows, use
+:meth:`~datasketch.WeightedMinHashGenerator.minhash_batch` instead of calling
+:meth:`~datasketch.WeightedMinHashGenerator.minhash` row by row. It accepts
+either a ``scipy.sparse`` matrix or a two-dimensional ``numpy.ndarray`` and
+returns a list with one entry per input row: a
+:class:`~datasketch.WeightedMinHash` for non-empty rows, and ``None`` for
+all-zero rows. The list keeps the original row positions, so empty rows never
+shift records when results are zipped with row IDs.
+
+Only non-zero coordinates participate in sampling: rows are never densified
+and no temporary matrix sized by the total number of non-zeros in the batch is
+allocated, which makes the method suitable for processing large matrices in
+chunks. Unsorted columns, duplicate coordinates (summed together) and explicit
+zeros (dropped) are handled on an internal copy -- the input matrix and the
+generator's parameters are never modified. Negative, NaN or infinite weights
+raise ``ValueError``.
+
+For every non-empty row, ``minhash_batch`` yields exactly the same hash values
+as ``minhash`` applied to that row as a dense ``float32`` vector, so signatures
+from both methods can be mixed in the same index.
+
+.. code:: python
+
+    import numpy as np
+    import scipy.sparse
+    from datasketch import WeightedMinHashGenerator, MinHashLSH
+
+    dim, sample_size = 1000, 128
+    wmg = WeightedMinHashGenerator(dim, sample_size)
+    lsh = MinHashLSH(threshold=0.5, num_perm=sample_size)
+
+    # A sparse term-frequency matrix, possibly loaded from disk in chunks.
+    X = scipy.sparse.csr_matrix(np.random.randint(0, 5, size=(100, dim)))
+    row_ids = ["doc-%d" % i for i in range(X.shape[0])]
+
+    # One list entry per row; None marks all-zero rows at their original slot.
+    minhashes = wmg.minhash_batch(X)
+
+    # Load the batch into the index using the original row IDs. None entries
+    # are skipped while positions stay aligned with row_ids.
+    lsh.insert_many(row_ids, minhashes)
+
+    # A signature generated one row at a time mixes freely with batch ones.
+    single = wmg.minhash(X[0].toarray().reshape(-1).astype(np.float32))
+    print(lsh.query(single))
+
+:class:`~datasketch.MinHashLSHForest` provides the equivalent
+:meth:`~datasketch.MinHashLSHForest.add_many` entry point (call
+:meth:`~datasketch.MinHashLSHForest.index` afterwards as usual).
+
 It is possible to make :class:`datasketch.WeightedMinHash` have a ``update`` interface
 similar to :class:`MinHash` and use it for stream data processing. However,
 this makes the cost of ``update`` increase linearly with respect to the

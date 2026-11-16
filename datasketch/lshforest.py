@@ -1,9 +1,11 @@
 from collections import defaultdict
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterable
+from typing import Union
 
 import numpy as np
 
 from datasketch.minhash import MinHash, _check_scheme_consistency
+from datasketch.weighted_minhash import WeightedMinHash
 
 
 class MinHashLSHForest:
@@ -68,6 +70,47 @@ class MinHashLSHForest:
                           for start, end in self.hashranges]
         for H, hashtable in zip(self.keys[key], self.hashtables):
             hashtable[H].append(key)
+
+    def add_many(
+        self,
+        keys: Iterable[Hashable],
+        minhashes: Iterable[Union[MinHash, WeightedMinHash, None]],
+    ) -> None:
+        """Add multiple unique keys together with their MinHash or weighted
+        MinHash objects, pairing each key with the minhash at the same
+        position. This is the intended entry point for loading results of
+        :meth:`WeightedMinHashGenerator.minhash_batch` together with the
+        original row IDs: ``None`` entries (all-zero rows) are skipped while
+        positions stay aligned, so no row ID is shifted past an empty row.
+
+        Like :meth:`add`, the keys won't be searchable until :meth:`index` is
+        called. Signatures produced by
+        :meth:`WeightedMinHashGenerator.minhash` and
+        :meth:`WeightedMinHashGenerator.minhash_batch` are interchangeable
+        and can be added together into the same forest.
+
+        Args:
+            keys (Iterable[Hashable]): The unique identifiers of the sets,
+                in the same row order as ``minhashes``.
+            minhashes (Iterable[Union[MinHash, WeightedMinHash, None]]): The
+                MinHash objects to add, or ``None`` for empty rows.
+
+        Raises:
+            ValueError: If ``keys`` and ``minhashes`` have different lengths,
+                or if a key has already been added.
+
+        """
+        keys = list(keys)
+        minhashes = list(minhashes)
+        if len(keys) != len(minhashes):
+            raise ValueError(
+                "keys and minhashes must have the same length, got %d and %d" % (len(keys), len(minhashes))
+            )
+        for key, minhash in zip(keys, minhashes):
+            if minhash is None:
+                # Empty row: keep alignment by simply not adding it.
+                continue
+            self.add(key, minhash)
 
     def index(self) -> None:
         """Index all the keys added so far and make them searchable."""

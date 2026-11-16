@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pickle
 import struct
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterable
 from typing import Callable, List, Optional, Union
 
 from scipy.integrate import quad as integrate
@@ -233,6 +233,49 @@ class MinHashLSH:
 
         """
         self._insert(key, minhash, check_duplication=check_duplication, buffer=False)
+
+    def insert_many(
+        self,
+        keys: Iterable[Hashable],
+        minhashes: Iterable[Union[MinHash, WeightedMinHash, None]],
+        check_duplication: bool = True,
+    ) -> None:
+        """Insert multiple keys into the index together with their MinHash
+        or weighted MinHash objects, pairing each key with the minhash at the
+        same position. This is the intended entry point for loading results of
+        :meth:`WeightedMinHashGenerator.minhash_batch` together with the
+        original row IDs: ``None`` entries (all-zero rows) are skipped while
+        positions stay aligned, so no row ID is shifted past an empty row.
+
+        Signatures produced by :meth:`WeightedMinHashGenerator.minhash` and
+        :meth:`WeightedMinHashGenerator.minhash_batch` are interchangeable
+        and can be inserted together into the same index.
+
+        Args:
+            keys (Iterable[Hashable]): The unique identifiers of the sets,
+                in the same row order as ``minhashes``.
+            minhashes (Iterable[Union[MinHash, WeightedMinHash, None]]): The
+                MinHash objects to index, or ``None`` for empty rows.
+            check_duplication (bool): Forwarded to :meth:`insert` for every
+                non-``None`` entry (`default=True`).
+
+        Raises:
+            ValueError: If ``keys`` and ``minhashes`` have different lengths,
+                or if a key already exists in the index when
+                ``check_duplication=True``.
+
+        """
+        keys = list(keys)
+        minhashes = list(minhashes)
+        if len(keys) != len(minhashes):
+            raise ValueError(
+                "keys and minhashes must have the same length, got %d and %d" % (len(keys), len(minhashes))
+            )
+        for key, minhash in zip(keys, minhashes):
+            if minhash is None:
+                # Empty row: keep alignment by simply not inserting it.
+                continue
+            self.insert(key, minhash, check_duplication=check_duplication)
 
     def merge(self, other: MinHashLSH, check_overlap: bool = False):
         """Merge the other MinHashLSH with this one, making this one the union

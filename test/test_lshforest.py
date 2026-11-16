@@ -2,6 +2,7 @@ import pickle
 import unittest
 
 import numpy as np
+import scipy.sparse
 
 from datasketch import WeightedMinHashGenerator
 from datasketch.lshforest import MinHashLSHForest
@@ -56,6 +57,34 @@ class TestMinHashLSHForest(unittest.TestCase):
     def test_init(self):
         forest = MinHashLSHForest()
         self.assertTrue(forest.is_empty())
+
+    def test_add_many(self):
+        forest = MinHashLSHForest()
+        minhashes = {}
+        for i, token in enumerate((b"a", b"b", b"c")):
+            m = MinHash()
+            m.update(token)
+            minhashes[i] = m
+        forest.add_many([0, 1, 2], [minhashes[0], minhashes[1], minhashes[2]])
+
+        # None entries are skipped but positions stay aligned with the keys.
+        forest.add_many([3, "empty", 4], [minhashes[0], None, minhashes[1]])
+        forest.index()
+
+        for key in (0, 1, 2, 3, 4):
+            self.assertIn(key, forest)
+        self.assertNotIn("empty", forest)
+        results = forest.query(minhashes[0], 10)
+        self.assertIn(0, results)
+        self.assertIn(3, results)
+
+        forest2 = MinHashLSHForest()
+        with self.assertRaises(ValueError):
+            forest2.add_many(["x"], [minhashes[0], minhashes[1]])
+        with self.assertRaises(ValueError):
+            forest2.add_many(["x", "y"], [minhashes[0]])
+        with self.assertRaises(ValueError):
+            forest.add_many([0], [minhashes[0]])
 
     def test_query(self):
         forest, data = self._setup()
@@ -149,6 +178,39 @@ class TestWeightedMinHashLSHForest(unittest.TestCase):
         for key in data:
             results = forest.query(data[key], 10)
             self.assertIn(key, results)
+
+    def test_add_many_from_batch_with_row_ids(self):
+        dim, sample_size, num_rows = 30, 32, 15
+        mg = WeightedMinHashGenerator(dim, sample_size=sample_size, seed=9)
+        rng = np.random.RandomState(1)
+        X = rng.randint(0, 5, size=(num_rows, dim)).astype(np.float32)
+        X[5] = 0.0
+        X[11] = 0.0
+        row_ids = ["row-%d" % i for i in range(num_rows)]
+
+        batch = mg.minhash_batch(scipy.sparse.csr_matrix(X))
+        forest = MinHashLSHForest(num_perm=sample_size)
+        forest.add_many(row_ids, batch)
+
+        # A single-row signature is interchangeable with the batch ones.
+        single = mg.minhash(X[0].copy())
+        forest.add("single-row", single)
+        forest.index()
+
+        for row in range(num_rows):
+            if row in (5, 11):
+                self.assertNotIn(row_ids[row], forest)
+            else:
+                self.assertIn(row_ids[row], forest)
+
+        results = forest.query(batch[0], 10)
+        self.assertIn("row-0", results)
+        self.assertIn("single-row", results)
+
+        with self.assertRaises(ValueError):
+            forest.add_many(["row-0"], [batch[0]])
+        with self.assertRaises(ValueError):
+            forest.add_many(["only"], [batch[0], batch[1]])
 
     def test_pickle(self):
         forest, _ = self._setup()

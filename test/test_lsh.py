@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import mockredis
 import numpy as np
+import scipy.sparse
 
 from datasketch.lsh import MinHashLSH
 from datasketch.minhash import MinHash
@@ -80,6 +81,32 @@ class TestMinHashLSH(unittest.TestCase):
 
         m3 = MinHash(18)
         self.assertRaises(ValueError, lsh.insert, "c", m3)
+
+    def test_insert_many(self):
+        lsh = MinHashLSH(threshold=0.5, num_perm=16)
+        minhashes = []
+        for token in (b"a", b"b", b"c"):
+            m = MinHash(16)
+            m.update(token)
+            minhashes.append(m)
+
+        lsh.insert_many(["a", "b", "c"], minhashes)
+
+        for key in ("a", "b", "c"):
+            self.assertTrue(key in lsh)
+        self.assertTrue("a" in lsh.query(minhashes[0]))
+
+        # None entries are skipped but positions stay aligned with the keys.
+        lsh2 = MinHashLSH(threshold=0.5, num_perm=16)
+        lsh2.insert_many(["a", "empty", "b"], [minhashes[0], None, minhashes[1]])
+        self.assertTrue("a" in lsh2)
+        self.assertTrue("b" in lsh2)
+        self.assertFalse("empty" in lsh2)
+
+        with self.assertRaises(ValueError):
+            lsh2.insert_many(["x"], [minhashes[0], minhashes[1]])
+        with self.assertRaises(ValueError):
+            lsh2.insert_many(["a"], [minhashes[0]])
 
     def test_query(self):
         lsh = MinHashLSH(threshold=0.5, num_perm=16)
@@ -532,6 +559,41 @@ class TestWeightedMinHashLSH(unittest.TestCase):
         mg = WeightedMinHashGenerator(10, 5)
         m3 = mg.minhash(np.random.uniform(1, 10, 10))
         self.assertRaises(ValueError, lsh.insert, "c", m3)
+
+    def test_insert_many_from_batch_with_row_ids(self):
+        dim, sample_size, num_rows = 20, 16, 12
+        mg = WeightedMinHashGenerator(dim, sample_size, seed=7)
+        rng = np.random.RandomState(0)
+        X = rng.randint(0, 5, size=(num_rows, dim)).astype(np.float32)
+        X[2] = 0.0
+        X[8] = 0.0
+        row_ids = ["row-%d" % i for i in range(num_rows)]
+
+        # Batch path on a sparse matrix, loaded by the original row IDs.
+        batch = mg.minhash_batch(scipy.sparse.csr_matrix(X))
+        lsh = MinHashLSH(threshold=0.1, num_perm=sample_size)
+        lsh.insert_many(row_ids, batch)
+
+        # Empty rows were skipped but every non-empty row ID is indexed.
+        for row in range(num_rows):
+            if row in (2, 8):
+                self.assertFalse(row_ids[row] in lsh)
+            else:
+                self.assertTrue(row_ids[row] in lsh)
+
+        # A single-row signature generated separately mixes with batch ones:
+        # both must be retrievable through the same index.
+        single = mg.minhash(X[0].copy())
+        np.testing.assert_array_equal(single.hashvalues, batch[0].hashvalues)
+        lsh.insert("single-row", single)
+        result = lsh.query(batch[0])
+        self.assertIn("row-0", result)
+        self.assertIn("single-row", result)
+
+        with self.assertRaises(ValueError):
+            lsh.insert_many(["row-0"], [batch[0]])
+        with self.assertRaises(ValueError):
+            lsh.insert_many(["only"], [batch[0], batch[1]])
 
     def test_query(self):
         lsh = MinHashLSH(threshold=0.5, num_perm=4)

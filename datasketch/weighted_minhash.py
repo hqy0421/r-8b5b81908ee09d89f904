@@ -158,6 +158,106 @@ class WeightedMinHashGenerator:
             hashvalues[i][0], hashvalues[i][1] = k, int(t[k])
         return WeightedMinHash(self.seed, hashvalues)
 
+    def minhash_batch(self, X: Union[sp.sparse.spmatrix, np.ndarray]) -> list[Union[WeightedMinHash, None]]:
+        """Create new WeightedMinHash instances in batches given a sparse
+        term-frequency matrix (or a dense matrix) of weighted Jaccard vectors.
+        Each row corresponds to a multi-set; each column stores the frequency
+        of the element of a dimension.
+
+        Unlike :meth:`minhash_many`, this method uses the same sampling
+        computation as :meth:`minhash`, so for every non-empty row the
+        returned :class:`WeightedMinHash` has exactly the same hash values as
+        calling :meth:`minhash` on that row as a dense ``float32`` vector.
+        All-zero rows return ``None`` at the same list position, so callers
+        can zip results with their original row IDs without records shifting
+        past empty rows.
+
+        Only non-zero coordinates participate in sampling: input rows are
+        never densified, and no temporary matrix whose size depends on the
+        total number of non-zeros of the whole batch is created. Unsorted
+        columns, duplicate coordinates (which are summed) and explicit zeros
+        (which are dropped) are handled on a private copy; the input is never
+        modified, nor are any parameters of this generator.
+
+        Args:
+            X (Union[scipy.sparse.spmatrix, numpy.ndarray]): A matrix of
+                Jaccard vectors (rows) of shape ``(num_rows, dim)``.
+
+        Returns:
+            list[Union[WeightedMinHash, None]]: A list of length
+            ``X.shape[0]``. Each element is either a
+            :class:`WeightedMinHash` instance or ``None`` (if the
+            corresponding row in ``X`` is all zeros).
+
+        Raises:
+            TypeError: If ``X`` is neither a sparse matrix nor a numpy array.
+            ValueError: If ``X`` does not have two dimensions, its number of
+                columns does not match :attr:`dim`, or it contains negative,
+                NaN or infinite weights.
+
+        """
+        # Input validation
+        if not isinstance(X, (sp.sparse.spmatrix, np.ndarray)):
+            raise TypeError("Input X must be a sparse matrix or numpy matrix")
+
+        if X.ndim != 2:
+            raise ValueError("Input must have two dimensions")
+
+        if X.shape[1] != self.dim:
+            raise ValueError("Input dimension mismatch, expecting %d" % self.dim)
+
+        # Build a private CSR copy so the caller's matrix (sparse or dense,
+        # sorted or unsorted, with duplicate or explicitly zero coordinates)
+        # is never mutated. Duplicate coordinates are summed and explicit
+        # zeros are dropped, leaving exactly the coordinates that
+        # np.log(> 0) is defined for -- matching the v == 0 -> NaN handling
+        # of minhash().
+        X = sp.sparse.csr_matrix(X, dtype=np.float32, copy=True)
+        X.sum_duplicates()
+        X.eliminate_zeros()
+        X.sort_indices()
+
+        # Illegal weights are rejected explicitly with a clear message.
+        # np.log would only warn and produce NaN silently.
+        if X.nnz > 0:
+            if not np.isfinite(X.data).all():
+                raise ValueError("Input weights must be finite, got NaN or infinity")
+            if np.any(X.data < 0):
+                raise ValueError("Input weights must be non-negative")
+
+        num_docs = X.shape[0]
+        ret: list[Union[WeightedMinHash, None]] = [None] * num_docs
+
+        # Each row is sampled independently. Per-row temporaries are sized by
+        # the row's own number of non-zeros, never by the batch total, so no
+        # sample_size x batch-nnz (or num_rows x dim) matrix is ever built.
+        indptr = X.indptr
+        for doc in range(num_docs):
+            begin, end = indptr[doc], indptr[doc + 1]
+            if begin == end:
+                # Empty row: keep its slot as None at the original position.
+                continue
+            doc_cidx = X.indices[begin:end]
+            vlog = np.log(X.data[begin:end])
+
+            # Same float32 element-wise operations, in the same order, as the
+            # single-row minhash() path, restricted to the non-zero columns.
+            # argmin over the non-zero columns is equivalent to nanargmin
+            # over all columns because the zero columns carry NaN there.
+            rs = self.rs[:, doc_cidx]
+            betas = self.betas[:, doc_cidx]
+            t = np.floor(vlog / rs + betas)
+            ln_y = (t - betas) * rs
+            ln_a = self.ln_cs[:, doc_cidx] - ln_y - rs
+
+            argmin = np.argmin(ln_a, axis=1)
+            hashvalues = np.zeros((self.sample_size, 2), dtype=int)
+            hashvalues[:, 0] = doc_cidx[argmin]
+            hashvalues[:, 1] = t[np.arange(self.sample_size), argmin]
+            ret[doc] = WeightedMinHash(self.seed, hashvalues)
+
+        return ret
+
     def minhash_many(self, X: Union[sp.sparse.spmatrix, np.ndarray]) -> list[Union[WeightedMinHash, None]]:
         """Create new WeightedMinHash instances given a matrix of weighted
         Jaccard vectors. In the input matrix X, each row corresponds to a
